@@ -1,2 +1,19 @@
 /Main
 /Notes
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local environments and runtime state
+.venv/
+venv/
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Local logs and secrets
+*.log
+.env
