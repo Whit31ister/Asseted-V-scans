@@ -9,8 +9,9 @@ Use it only against domains you own or are explicitly authorized to monitor. CT 
 * Queries `crt.sh`, with Cert Spotter as a fallback, for certificate names.
 * Normalizes and filters names so only subdomains of the target are retained.
 * Resolves `A` and `AAAA` records concurrently to identify active assets.
+* Optionally probes active assets over HTTPS and HTTP for status codes, page titles, and server headers.
 * Maintains local SQLite state and reports hostnames not seen before.
-* Sends optional Discord-compatible webhook notifications for new assets.
+* Sends optional Discord or Telegram notifications for new assets and probe results.
 
 ## Requirements
 
@@ -58,6 +59,8 @@ python main.py --target example.com
 * `--threads N` limits concurrent DNS lookups (default: `50`; minimum: `1`).
 * `--db PATH` selects the SQLite file (default: `data/assets.db`).
 * `--timeout SECONDS` sets the HTTP, DNS, and webhook timeout (default: `10.0`).
+* `--probe` probes active assets over HTTPS and HTTP.
+* `--telegram BOT_TOKEN/CHAT_ID` sends alerts through the Telegram Bot API.
 * `--json` emits `target`, `assets`, and `new_assets` as JSON.
 * `-v` / `--verbose` enables debug logging.
 
@@ -85,15 +88,28 @@ Examples:
   python main.py --target example.com --json
   ```
 
+  * **Probe active web services:**
+
+    ```bash
+    python main.py --target example.com --probe --json
+    ```
+
+  * **Enable Telegram alerts:**
+
+    ```bash
+    python main.py --target example.com --telegram 'BOT_TOKEN/CHAT_ID'
+    ```
+
 The first scan stores every active asset as a baseline. Later scans report only
 assets that have not been seen before in the configured SQLite database. Address
 changes update an existing record but do not count as a new hostname. Names
 found in CT logs without an `A` or `AAAA` address are not stored as active assets.
 If `crt.sh` fails, the monitor retries through Cert Spotter before failing.
 
-The webhook option uses Discord's JSON webhook format (`content`). Telegram bot
-API payloads are not implemented by the current code. A failed webhook request
-is reported as an error rather than being silently ignored.
+Discord alerts use the JSON webhook `content` field. Telegram alerts use the
+Bot API `sendMessage` endpoint. Alerts include newly discovered assets and,
+when `--probe` is enabled, HTTP status/title/server metadata. A failed
+notification request is reported as an error rather than silently ignored.
 
 ## Automated Execution
 

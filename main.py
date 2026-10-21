@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from core.discovery import discover_subdomains
+from core.prober import probe_assets
 from core.resolver import resolve_subdomains
 from database.state import AssetStore
 from utils.webhook import send_webhook
@@ -33,9 +34,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--webhook",
-        help="Discord/Telegram-compatible webhook URL for new asset alerts",
+        help="Discord webhook URL for new asset alerts",
     )
     parser.add_argument("--timeout", type=float, default=10.0, help="Network timeout in seconds")
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="Probe active assets over HTTPS/HTTP for status, title, and server",
+    )
+    parser.add_argument(
+        "--telegram",
+        metavar="BOT_TOKEN/CHAT_ID",
+        help="Send alerts through Telegram using BOT_TOKEN/CHAT_ID",
+    )
     parser.add_argument("--json", action="store_true", help="Print results as JSON")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     return parser
@@ -54,6 +65,15 @@ async def run(args: argparse.Namespace) -> int:
     target = args.target.strip().lower().rstrip(".")
     discovered = await discover_subdomains(target, timeout=args.timeout)
     assets = await resolve_subdomains(discovered, concurrency=args.threads, timeout=args.timeout)
+    probes = (
+        await probe_assets(
+            [asset["hostname"] for asset in assets],
+            concurrency=args.threads,
+            timeout=args.timeout,
+        )
+        if args.probe
+        else {}
+    )
 
     with AssetStore(args.db) as store:
         new_assets = store.record_scan(target, assets)
@@ -61,16 +81,40 @@ async def run(args: argparse.Namespace) -> int:
     if args.json:
         import json
 
-        print(json.dumps({"target": target, "assets": assets, "new_assets": new_assets}, indent=2))
+        print(
+            json.dumps(
+                {"target": target, "assets": assets, "new_assets": new_assets, "probes": probes},
+                indent=2,
+            )
+        )
     else:
         print(f"Target: {target}")
         print(f"Active assets: {len(assets)}")
         print(f"New assets: {len(new_assets)}")
         for asset in assets:
             print(f"  {asset['hostname']} -> {', '.join(asset['addresses'])}")
+            for probe in probes.get(asset["hostname"], []):
+                print(
+                    f"    {probe['url']} [{probe['status']}]"
+                    f" title={probe['title'] or '-'} server={probe['server'] or '-'}"
+                )
 
-    if args.webhook and new_assets:
-        await send_webhook(args.webhook, target, new_assets, timeout=args.timeout)
+    if args.webhook and (new_assets or probes):
+        await send_webhook(
+            args.webhook,
+            target,
+            new_assets,
+            probes=probes,
+            timeout=args.timeout,
+        )
+    if args.telegram and (new_assets or probes):
+        await send_webhook(
+            f"https://api.telegram.org/bot{args.telegram}",
+            target,
+            new_assets,
+            probes=probes,
+            timeout=args.timeout,
+        )
     return 0
 
 
