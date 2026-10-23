@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Callable
 from typing import TypedDict
 
 import aiohttp
@@ -16,6 +17,7 @@ class ProbeResult(TypedDict):
     server: str | None
 
 
+ProbeCallback = Callable[[int, int, str, list[ProbeResult]], None]
 TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title\s*>", re.IGNORECASE | re.DOTALL)
 MAX_BODY_BYTES = 256 * 1024
 
@@ -64,10 +66,20 @@ async def probe_one(
 
 
 async def probe_assets(
-    hostnames: list[str], concurrency: int = 50, timeout: float = 10.0
+    hostnames: list[str],
+    concurrency: int = 50,
+    timeout: float = 10.0,
+    *,
+    on_result: ProbeCallback | None = None,
 ) -> dict[str, list[ProbeResult]]:
-    """Probe active hostnames concurrently without failing the whole scan."""
+    """Probe active hostnames concurrently without failing the whole scan.
+
+    ``on_result`` receives ``(completed, total, hostname, probes)`` after each
+    hostname and is optional.
+    """
     semaphore = asyncio.Semaphore(concurrency)
+    total = len(hostnames)
+    completed = 0
     results: dict[str, list[ProbeResult]] = {}
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=timeout),
@@ -75,10 +87,14 @@ async def probe_assets(
     ) as session:
 
         async def limited(hostname: str) -> None:
+            nonlocal completed
             async with semaphore:
                 probes = await probe_one(hostname, timeout, session)
-                if probes:
-                    results[hostname] = probes
+            completed += 1
+            if probes:
+                results[hostname] = probes
+            if on_result is not None:
+                on_result(completed, total, hostname, probes)
 
         await asyncio.gather(*(limited(hostname) for hostname in hostnames))
     return dict(sorted(results.items()))

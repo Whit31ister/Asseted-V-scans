@@ -10,6 +10,7 @@ from typing import Any
 import aiohttp
 
 LOGGER = logging.getLogger(__name__)
+SourceCallback = Callable[[str, bool, int, str | None], None]
 CRT_SH_URL = "https://crt.sh/"
 CERTSPOTTER_URL = "https://api.certspotter.com/v1/issuances"
 OTX_URL = "https://otx.alienvault.com/api/v1/indicators/domain/{target}/passive_dns"
@@ -88,11 +89,18 @@ async def _fetch_hackertarget(
     return parse_hackertarget(body, target)
 
 
-async def discover_subdomains(target: str, timeout: float = 10.0) -> list[str]:
+async def discover_subdomains(
+    target: str,
+    timeout: float = 10.0,
+    *,
+    on_source: SourceCallback | None = None,
+) -> list[str]:
     """Aggregate and deduplicate names from independent passive DNS sources.
 
     A source outage is isolated from the others. The scan fails only when every
     source fails, preventing one rate-limited provider from hiding valid results.
+    ``on_source`` receives ``(name, ok, count, error)`` after each source attempt
+    finishes and is optional.
     """
     request_timeout = aiohttp.ClientTimeout(total=timeout)
     source_requests: tuple[tuple[str, Callable[[], Awaitable[set[str]]]], ...] = (
@@ -134,10 +142,13 @@ async def discover_subdomains(target: str, timeout: float = 10.0) -> list[str]:
         async def fetch_source(
             name: str, fetch: Callable[[], Awaitable[set[str]]]
         ) -> tuple[bool, set[str]]:
+            last_error = "unknown error"
             for attempt in range(2):
                 try:
                     result = await fetch()
                     LOGGER.info("%s returned %d subdomains", name, len(result))
+                    if on_source is not None:
+                        on_source(name, True, len(result), None)
                     return True, result
                 except (
                     aiohttp.ClientError,
@@ -146,7 +157,10 @@ async def discover_subdomains(target: str, timeout: float = 10.0) -> list[str]:
                     TypeError,
                     ValueError,
                 ) as exc:
+                    last_error = str(exc) or type(exc).__name__
                     LOGGER.warning("%s request failed (attempt %d/2): %s", name, attempt + 1, exc)
+            if on_source is not None:
+                on_source(name, False, 0, last_error)
             return False, set()
 
         results = await asyncio.gather(

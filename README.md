@@ -1,172 +1,262 @@
 # Asset Monitor
 
-Asset Monitor discovers subdomains from public Certificate Transparency and passive DNS sources, checks which names currently resolve in DNS, stores scan state in SQLite, and reports newly observed active assets.
+Asset Monitor is a Python application for passive subdomain discovery and asset
+change detection. It collects names from public Certificate Transparency and
+passive DNS sources, resolves active `A` and `AAAA` records, stores scan state in
+SQLite, and reports hostnames that have not been observed before.
 
-Use it only against domains you own or are explicitly authorized to monitor. CT data is public, but DNS probing and monitoring can still be subject to program rules, provider policies, and local law.
+The project provides two interfaces:
+
+- a command-line interface for scheduled or interactive scans;
+- a local web dashboard for live progress, results, history, and exports.
+
+Use this tool only against domains that you own or are explicitly authorized to
+assess. Certificate Transparency data is public, but DNS queries, HTTP probing,
+and monitoring activity can still be governed by program rules, provider
+policies, and local law.
 
 ## Features
 
-* Aggregates and deduplicates names from `crt.sh`, Cert Spotter, AlienVault OTX, and HackerTarget.
-* Normalizes and filters names so only subdomains of the target are retained.
-* Resolves `A` and `AAAA` records concurrently to identify active assets.
-* Optionally probes active assets over HTTPS and HTTP for status codes, page titles, and server headers.
-* Maintains local SQLite state and reports hostnames not seen before.
-* Sends optional Discord or Telegram notifications for new assets and probe results.
+- Aggregates and deduplicates subdomains from `crt.sh`, Cert Spotter,
+  AlienVault OTX, and HackerTarget.
+- Resolves `A` and `AAAA` records concurrently and records only names with an
+  active address.
+- Optionally probes active hosts over HTTPS and HTTP for status codes, final
+  URLs, page titles, and `Server` headers.
+- Stores tracked assets, first/last seen timestamps, and scan-run history in
+  SQLite.
+- Sends optional Discord or Telegram notifications for new assets and probe
+  results.
+- Provides a local FastAPI dashboard with Server-Sent Events (SSE) progress,
+  streaming logs, result filtering, scan history, and JSON/CSV export.
+- Supports cancellation of the active dashboard scan.
+- Does not persist Discord webhook URLs or Telegram bot tokens.
 
 ## Requirements
 
-### Prerequisites
-
-* Python 3.10 or higher
-* Network access to the selected CT provider, DNS resolvers, and optional webhook endpoint
-* Authorization to monitor the target domain
+- Python 3.10 or later.
+- Network access to the configured discovery providers, DNS resolvers, target
+  hosts when probing is enabled, and notification endpoints.
+- Authorization to monitor the target domain.
+- A modern browser for the web dashboard.
 
 ## Installation
 
-### Setup
+Create a virtual environment and install the runtime dependencies:
 
-1. Clone the repository:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
 
-   ```bash
-   git clone https://github.com/Whit31ister/asset_monitor.git
-   cd asset_monitor
-   ```
+On Windows PowerShell, activate the environment with:
 
-2. Create and activate a virtual environment:
+```powershell
+.venv\Scripts\Activate.ps1
+```
 
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
-   ```
+Install development dependencies to run the test suite:
 
-3. Install the required dependencies:
+```bash
+python -m pip install -r requirements-dev.txt
+```
 
-   ```bash
-   python -m pip install -r requirements.txt
-   ```
+## Quick start
 
-## Usage
+### Web dashboard
 
-Basic run against a target domain:
+Start the local dashboard:
+
+```bash
+python gui.py
+```
+
+The server binds to `127.0.0.1:8000` and opens the dashboard in the default
+browser. Use `--no-browser` on headless systems or `--port` to select a different
+port:
+
+```bash
+python gui.py --port 8080 --no-browser
+```
+
+The dashboard provides:
+
+- scan configuration for target, concurrency, timeout, database path, probing,
+  and notifications;
+- source-level discovery results and live scan logs;
+- phase and progress reporting for discovery, DNS resolution, probing, state
+  updates, and notifications;
+- a filterable results table with new/known status and probe details;
+- JSON and CSV export for completed scans;
+- scan-run history and tracked assets from the selected SQLite database;
+- browser-local defaults for non-secret settings.
+
+Only one scan can run per server process. The local server has no authentication
+and must not be exposed to an untrusted network. See the
+[web interface guide](docs/gui.md) for operation and configuration details.
+
+### Command line
+
+Run a basic scan:
 
 ```bash
 python main.py --target example.com
 ```
 
-### Options and examples
+Run a scan with probing and JSON output:
 
-* `--target DOMAIN` is required.
-* `--threads N` limits concurrent DNS lookups (default: `50`; minimum: `1`).
-* `--db PATH` selects the SQLite file (default: `data/assets.db`).
-* `--timeout SECONDS` sets the CT, DNS, probe, and notification timeout (default: `10.0`).
-* `--webhook URL` sends Discord notifications.
-* `--probe` probes active assets over HTTPS and HTTP.
-* `--telegram BOT_TOKEN/CHAT_ID` sends alerts through the Telegram Bot API.
-* `--json` emits `target`, `assets`, `new_assets`, and `probes` as JSON. `probes` is empty unless `--probe` is enabled.
-* `-v` / `--verbose` enables debug logging.
+```bash
+python main.py --target example.com --probe --json
+```
+
+Run a scan with a Discord notification:
+
+```bash
+python main.py \
+  --target example.com \
+  --webhook 'https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN'
+```
+
+Run a scan with a Telegram notification:
+
+```bash
+python main.py \
+  --target example.com \
+  --telegram 'BOT_TOKEN/CHAT_ID'
+```
+
+The first scan against a database stores all active assets as a baseline.
+Subsequent scans report only hostnames that were not previously stored for the
+same target. Address changes update the existing record but do not count as a new
+hostname.
+
+## CLI reference
+
+| Option | Description |
+| --- | --- |
+| `--target DOMAIN` | Target root domain. Required. |
+| `--threads N` | Maximum concurrent DNS lookups. Default: `50`; minimum: `1`. |
+| `--timeout SECONDS` | Network timeout for discovery, DNS, probing, and notifications. Default: `10.0`. |
+| `--db PATH` | SQLite database path. Default: `data/assets.db`. |
+| `--probe` | Probe active hosts over HTTPS and HTTP. |
+| `--webhook URL` | Send Discord notifications through a webhook. |
+| `--telegram BOT_TOKEN/CHAT_ID` | Send notifications through the Telegram Bot API. |
+| `--json` | Print `target`, `assets`, `new_assets`, and `probes` as JSON. |
+| `-v`, `--verbose` | Enable debug logging. |
 
 Examples:
 
-  ```bash
-  python main.py --target example.com --threads 10 --timeout 15
-  ```
-
-* **Set a custom database path:**
-
-  ```bash
-  python main.py --target example.com --db data/custom_assets.db
-  ```
-
-* **Enable Discord alerts:**
-
-  ```bash
-  python main.py --target example.com --webhook 'https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN'
-  ```
-
-* **Emit machine-readable output:**
-
-  ```bash
-  python main.py --target example.com --json
-  ```
-
-  * **Probe active web services:**
-
-    ```bash
-    python main.py --target example.com --probe --json
-    ```
-
-  * **Enable Telegram alerts:**
-
-    ```bash
-    python main.py --target example.com --telegram 'BOT_TOKEN/CHAT_ID'
-    ```
-
-The first scan stores every active asset as a baseline. Later scans report only
-assets that have not been seen before in the configured SQLite database. Address
-changes update an existing record but do not count as a new hostname. Names
-found in CT logs without an `A` or `AAAA` address are not stored as active assets.
-Each passive discovery source is retried independently, twice. Results from all
-successful sources are merged and deduplicated; one provider being unavailable
-does not discard results from the others. The scan fails only if every source
-is unavailable.
-
-With `--probe`, every active hostname is requested over HTTPS and then HTTP.
-Reachable responses include the final URL, status code, page title, and `Server`
-header. Probe failures are skipped per URL and do not fail the scan.
-
-Discord alerts use the JSON webhook `content` field. Telegram alerts use the
-Bot API `sendMessage` endpoint. Alerts include newly discovered assets and,
-when `--probe` is enabled, HTTP status/title/server metadata. Messages are split
-to fit provider limits. A failed notification request is reported as an error
-rather than silently ignored.
-
-## Automated Execution
-
-To run the monitor continuously using a cron job, add an entry to your crontab:
-
 ```bash
-0 */6 * * * /path/to/asset_monitor/.venv/bin/python /path/to/asset_monitor/main.py --target example.com --db /path/to/asset_monitor/data/assets.db >> /path/to/asset_monitor/cron.log 2>&1
+python main.py --target example.com --threads 10 --timeout 15
+python main.py --target example.com --db data/custom_assets.db
+python main.py --target example.com --probe --json
 ```
 
-## Directory Structure
+### Exit status
 
-```text
-asset_monitor/
-├── main.py                # Main CLI entry point
-├── core/                  # Scanning and DNS resolution logic
-├── database/              # SQLite state management
-├── utils/                 # Webhook and alert helper utilities
-├── tests/                 # Unit tests for normalization and state tracking
-├── docs/                  # Architecture and operational documentation
-├── requirements.txt       # Project dependencies
-├── requirements-dev.txt   # Test/development dependencies
-└── README.md              # Documentation
+| Code | Meaning |
+| --- | --- |
+| `0` | Scan completed successfully. |
+| `2` | Invalid input, a handled runtime error, or a notification failure after results were saved. |
+
+Unhandled exceptions may produce a non-zero exit status and a traceback.
+
+## Scan behavior
+
+Discovery runs four passive sources in parallel. Each source is attempted twice.
+Results are normalized, filtered to the target domain, merged, and deduplicated.
+A source failure does not discard results from the other sources. The scan fails
+only when every source fails.
+
+DNS resolution checks both `A` and `AAAA`. A name is stored only when at least
+one address is returned. With `--probe`, each active hostname is requested over
+HTTPS and then HTTP. Probe redirects are followed, response bodies are limited to
+256 KiB, and titles are normalized. Individual probe failures are ignored.
+
+Discord notifications use the webhook `content` field. Telegram notifications use
+the Bot API `sendMessage` endpoint. Messages are split to respect provider limits.
+A notification is sent when the scan produced new assets or at least one probe
+result. The message includes new assets and, when probing is enabled, probe
+metadata.
+
+Probe results are not stored in SQLite. They are available in the current scan
+result, the dashboard, exports, and notifications.
+
+## Data storage
+
+The SQLite database stores:
+
+- one row per `(target, hostname)` pair;
+- resolved addresses as a JSON array;
+- first seen and last seen timestamps;
+- one row per scan run with status, counts, timestamps, and errors.
+
+The database uses WAL mode so the dashboard can read history while a scan is
+writing. Missing databases are not created by history requests. Removing or
+replacing the database resets the new-asset baseline for the affected targets.
+
+## Automated execution
+
+The CLI can be scheduled with cron or another process manager. Use absolute paths
+and run one manual scan before enabling automation:
+
+```cron
+0 */6 * * * /srv/asset-monitor/.venv/bin/python /srv/asset-monitor/main.py --target example.com --db /srv/asset-monitor/data/example.db >> /srv/asset-monitor/logs/example.log 2>&1
 ```
 
-## Development and tests
+Create the log directory first and restrict access to logs, databases, and
+configuration files that contain notification credentials.
+
+## Development
+
+Install development dependencies and run the test suite from the repository
+root:
 
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-The unit tests cover hostname normalization, passive-source parsing, title
-extraction, and SQLite new-asset detection. They do not call live CT, DNS, or
-HTTP services.
+The tests cover hostname normalization, passive-source parsing, title extraction,
+SQLite change detection, scan-run history, shared scan orchestration, and the web
+API. Network calls are mocked.
+
+## Project structure
+
+```text
+asset_monitor/
+├── main.py                # CLI entry point
+├── gui.py                 # Local web dashboard launcher
+├── core/                  # Shared scan pipeline, discovery, DNS, probing
+├── database/              # SQLite state and scan-run history
+├── utils/                 # Notification helpers
+├── web/                   # FastAPI application, jobs, static dashboard
+├── tests/                 # Unit and API tests
+├── docs/                  # Architecture, API, GUI, and operations documentation
+├── requirements.txt       # Runtime dependencies
+├── requirements-dev.txt   # Test and development dependencies
+└── README.md
+```
 
 ## Limitations
 
-* Discovery depends on public CT/passive-DNS APIs and cannot enumerate names absent from those sources.
-* Public providers may rate-limit requests or return incomplete results.
-* Only `A` and `AAAA` answers count as active; CNAME-only names are not included.
-* SQLite state is local and historical: hostnames that disappear are retained.
-* Webhook failures cause the CLI run to fail rather than being silently ignored.
+- Passive discovery cannot find names that are absent from the queried sources.
+- Public providers may rate-limit requests or return incomplete results.
+- Only names with at least one `A` or `AAAA` answer are stored as active assets.
+- SQLite state is historical. Hostnames that no longer resolve remain in the
+  database.
+- The dashboard is single-user and accepts one scan at a time.
+- Completed dashboard jobs are held in memory for a limited time. Persistent
+  history is available from SQLite.
 
-## Further documentation
+## Documentation
 
-* [Architecture and data model](docs/architecture.md)
-* [Operations and troubleshooting](docs/operations.md)
+- [Architecture and data model](docs/architecture.md)
+- [Web interface guide](docs/gui.md)
+- [HTTP API reference](docs/api.md)
+- [Operations and troubleshooting](docs/operations.md)
 
 ## License
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

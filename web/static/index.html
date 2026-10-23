@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Asset Monitor</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230ea5e9'/%3E%3Cpath d='M18 42l9-22h8l9 22h-7l-2-6H27l-2 6zm11-12h4l-2-6z' fill='%23071422'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">AM</span>
+        <div>
+          <h1>Asset Monitor</h1>
+          <p>Passive discovery and change detection</p>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span id="connection" class="connection connection-offline">
+          <span class="connection-dot"></span>
+          <span id="connection-text">Connecting</span>
+        </span>
+        <span id="version" class="version">v1.0.0</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <nav class="nav" aria-label="Main navigation">
+          <button type="button" class="nav-item active" data-view="scan">
+            Scan
+          </button>
+          <button type="button" class="nav-item" data-view="history">
+            History
+          </button>
+          <button type="button" class="nav-item" data-view="settings">
+            Settings
+          </button>
+        </nav>
+        <p class="sidebar-note">
+          Monitor only domains you own or are authorized to assess.
+        </p>
+      </aside>
+
+      <main class="content">
+        <section id="view-scan" class="view active">
+          <div class="page-heading">
+            <div>
+              <h2>Scan</h2>
+              <p>
+                Discover active subdomains, probe web services, and track
+                changes.
+              </p>
+            </div>
+            <span id="job-status" class="badge badge-idle">Idle</span>
+          </div>
+
+          <form id="scan-form" class="card scan-form">
+            <div class="form-grid">
+              <label class="field field-wide">
+                <span>Target domain</span>
+                <input
+                  id="target"
+                  type="text"
+                  placeholder="example.com"
+                  autocomplete="off"
+                  spellcheck="false"
+                  required
+                />
+              </label>
+              <label class="field">
+                <span>Concurrency</span>
+                <input
+                  id="threads"
+                  type="number"
+                  min="1"
+                  max="500"
+                  step="1"
+                  value="50"
+                  required
+                />
+              </label>
+              <label class="field">
+                <span>Timeout (seconds)</span>
+                <input
+                  id="timeout"
+                  type="number"
+                  min="0.1"
+                  max="300"
+                  step="0.1"
+                  value="10"
+                  required
+                />
+              </label>
+              <label class="field field-wide">
+                <span>SQLite database</span>
+                <input
+                  id="db"
+                  type="text"
+                  value="data/assets.db"
+                  autocomplete="off"
+                  spellcheck="false"
+                  required
+                />
+              </label>
+            </div>
+
+            <div class="toggle-row">
+              <label class="toggle">
+                <input id="probe" type="checkbox" />
+                <span>Probe active assets over HTTPS and HTTP</span>
+              </label>
+              <label class="toggle">
+                <input id="verbose" type="checkbox" />
+                <span>Verbose logs</span>
+              </label>
+            </div>
+
+            <details class="advanced">
+              <summary>Notifications (never stored)</summary>
+              <div class="form-grid">
+                <label class="field field-wide">
+                  <span>Discord webhook</span>
+                  <input
+                    id="webhook"
+                    type="url"
+                    placeholder="https://discord.com/api/webhooks/..."
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+                <label class="field field-wide">
+                  <span>Telegram BOT_TOKEN/CHAT_ID</span>
+                  <input
+                    id="telegram"
+                    type="text"
+                    placeholder="123456:ABC.../123456789"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+              </div>
+              <p class="help">
+                Credentials are sent only to the local backend, cleared from the
+                form when a scan starts, and never written to disk. The first
+                scan treats every active asset as new.
+              </p>
+            </details>
+
+            <div class="form-actions">
+              <button id="run-button" class="btn btn-primary" type="submit">
+                Start scan
+              </button>
+              <button
+                id="cancel-button"
+                class="btn btn-danger"
+                type="button"
+                disabled
+              >
+                Cancel
+              </button>
+              <span id="form-error" class="form-error" role="alert"></span>
+            </div>
+          </form>
+
+          <div class="stats-grid">
+            <div class="stat">
+              <span class="stat-label">Active</span>
+              <strong id="stat-active">0</strong>
+            </div>
+            <div class="stat">
+              <span class="stat-label">New</span>
+              <strong id="stat-new">0</strong>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Probed</span>
+              <strong id="stat-probed">0</strong>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Elapsed</span>
+              <strong id="stat-elapsed">00:00</strong>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h3>Progress</h3>
+              <span id="progress-label" class="muted">Waiting</span>
+            </div>
+            <div
+              class="progress"
+              role="progressbar"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+              id="progress"
+            >
+              <div id="progress-bar" class="progress-bar"></div>
+            </div>
+
+            <ol class="phases">
+              <li data-phase="discovery">
+                <span class="phase-dot"></span>
+                <span>Discovery</span>
+                <small id="phase-discovery">pending</small>
+              </li>
+              <li data-phase="resolve">
+                <span class="phase-dot"></span>
+                <span>DNS resolution</span>
+                <small id="phase-resolve">pending</small>
+              </li>
+              <li data-phase="probe">
+                <span class="phase-dot"></span>
+                <span>Web probing</span>
+                <small id="phase-probe">pending</small>
+              </li>
+              <li data-phase="save">
+                <span class="phase-dot"></span>
+                <span>State update</span>
+                <small id="phase-save">pending</small>
+              </li>
+              <li data-phase="notify">
+                <span class="phase-dot"></span>
+                <span>Notifications</span>
+                <small id="phase-notify">pending</small>
+              </li>
+            </ol>
+
+            <div id="sources" class="sources" aria-label="Discovery sources"></div>
+
+            <div class="log-head">
+              <h4>Live log</h4>
+              <button id="clear-log" class="btn btn-ghost" type="button">
+                Clear
+              </button>
+            </div>
+            <div id="log" class="log-console" aria-live="polite"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-head results-head">
+              <h3>Results</h3>
+              <div class="table-tools">
+                <input
+                  id="result-filter"
+                  type="search"
+                  placeholder="Filter hostnames"
+                  autocomplete="off"
+                />
+                <button
+                  id="export-json"
+                  class="btn btn-ghost"
+                  type="button"
+                  disabled
+                >
+                  JSON
+                </button>
+                <button
+                  id="export-csv"
+                  class="btn btn-ghost"
+                  type="button"
+                  disabled
+                >
+                  CSV
+                </button>
+              </div>
+            </div>
+            <div id="results-empty" class="empty">
+              No results yet. Start a scan to discover active assets.
+            </div>
+            <div class="table-wrap">
+              <table id="results-table">
+                <thead>
+                  <tr>
+                    <th>
+                      <button type="button" class="sort-button" data-sort="hostname">
+                        Hostname
+                      </button>
+                    </th>
+                    <th>Addresses</th>
+                    <th>
+                      <button type="button" class="sort-button" data-sort="status">
+                        Status
+                      </button>
+                    </th>
+                    <th>Probes</th>
+                  </tr>
+                </thead>
+                <tbody id="results-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-history" class="view">
+          <div class="page-heading">
+            <div>
+              <h2>History</h2>
+              <p>Review recorded scan runs and tracked assets.</p>
+            </div>
+            <button id="refresh-history" class="btn btn-secondary" type="button">
+              Refresh
+            </button>
+          </div>
+
+          <div class="card history-toolbar">
+            <label class="field">
+              <span>Target</span>
+              <select id="history-target">
+                <option value="">All targets</option>
+              </select>
+            </label>
+            <span id="history-db" class="muted"></span>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h3>Scan runs</h3>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Started</th>
+                    <th>Target</th>
+                    <th>Status</th>
+                    <th>Assets</th>
+                    <th>New</th>
+                    <th>Probes</th>
+                    <th>Error</th>
+                  </tr>
+                </thead>
+                <tbody id="history-runs-body"></tbody>
+              </table>
+            </div>
+            <div id="history-runs-empty" class="empty">
+              No scan runs recorded.
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head results-head">
+              <h3>Tracked assets</h3>
+              <input
+                id="history-search"
+                type="search"
+                placeholder="Search hostnames"
+                autocomplete="off"
+              />
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Hostname</th>
+                    <th>Target</th>
+                    <th>Addresses</th>
+                    <th>First seen</th>
+                    <th>Last seen</th>
+                  </tr>
+                </thead>
+                <tbody id="history-assets-body"></tbody>
+              </table>
+            </div>
+            <div id="history-assets-empty" class="empty">
+              No tracked assets.
+            </div>
+          </div>
+        </section>
+
+        <section id="view-settings" class="view">
+          <div class="page-heading">
+            <div>
+              <h2>Settings</h2>
+              <p>Defaults are saved in this browser only.</p>
+            </div>
+          </div>
+
+          <form id="settings-form" class="card settings-form">
+            <div class="form-grid">
+              <label class="field field-wide">
+                <span>Default SQLite database</span>
+                <input
+                  id="settings-db"
+                  type="text"
+                  value="data/assets.db"
+                  autocomplete="off"
+                  spellcheck="false"
+                  required
+                />
+              </label>
+              <label class="field">
+                <span>Default concurrency</span>
+                <input
+                  id="settings-threads"
+                  type="number"
+                  min="1"
+                  max="500"
+                  value="50"
+                  required
+                />
+              </label>
+              <label class="field">
+                <span>Default timeout (seconds)</span>
+                <input
+                  id="settings-timeout"
+                  type="number"
+                  min="0.1"
+                  max="300"
+                  step="0.1"
+                  value="10"
+                  required
+                />
+              </label>
+            </div>
+            <div class="toggle-row">
+              <label class="toggle">
+                <input id="settings-probe" type="checkbox" />
+                <span>Enable probing by default</span>
+              </label>
+              <label class="toggle">
+                <input id="settings-verbose" type="checkbox" />
+                <span>Enable verbose logs by default</span>
+              </label>
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-primary" type="submit">
+                Save settings
+              </button>
+              <button
+                id="reset-settings"
+                class="btn btn-secondary"
+                type="button"
+              >
+                Reset defaults
+              </button>
+            </div>
+          </form>
+
+          <div class="card about-card">
+            <h3>About</h3>
+            <p>
+              Asset Monitor aggregates public certificate transparency and
+              passive DNS sources, resolves active A/AAAA records, and records
+              new assets in SQLite.
+            </p>
+            <p>
+              The local server has no authentication. Keep it bound to
+              <code>127.0.0.1</code> and never expose it to an untrusted
+              network. Webhook URLs and bot tokens are never persisted.
+            </p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

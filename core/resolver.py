@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import TypedDict
 
 import dns.asyncresolver
@@ -12,6 +13,9 @@ import dns.exception
 class Asset(TypedDict):
     hostname: str
     addresses: list[str]
+
+
+ResolveCallback = Callable[[int, int, Asset | None], None]
 
 
 async def resolve_one(hostname: str, timeout: float) -> Asset | None:
@@ -29,14 +33,29 @@ async def resolve_one(hostname: str, timeout: float) -> Asset | None:
 
 
 async def resolve_subdomains(
-    hostnames: list[str], concurrency: int = 50, timeout: float = 10.0
+    hostnames: list[str],
+    concurrency: int = 50,
+    timeout: float = 10.0,
+    *,
+    on_result: ResolveCallback | None = None,
 ) -> list[Asset]:
-    """Resolve hostnames concurrently, excluding names with no A/AAAA records."""
+    """Resolve hostnames concurrently, excluding names with no A/AAAA records.
+
+    ``on_result`` receives ``(completed, total, asset)`` after each lookup and is
+    optional. ``asset`` is ``None`` when the hostname did not resolve.
+    """
     semaphore = asyncio.Semaphore(concurrency)
+    total = len(hostnames)
+    completed = 0
 
     async def limited(hostname: str) -> Asset | None:
+        nonlocal completed
         async with semaphore:
-            return await resolve_one(hostname, timeout)
+            result = await resolve_one(hostname, timeout)
+        completed += 1
+        if on_result is not None:
+            on_result(completed, total, result)
+        return result
 
     results = await asyncio.gather(*(limited(hostname) for hostname in hostnames))
     return sorted((result for result in results if result), key=lambda item: item["hostname"])
