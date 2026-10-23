@@ -1,12 +1,12 @@
 # Asset Monitor
 
-Asset Monitor discovers subdomains from public Certificate Transparency (CT) logs, checks which names currently resolve in DNS, stores scan state in SQLite, and reports newly observed active assets.
+Asset Monitor discovers subdomains from public Certificate Transparency and passive DNS sources, checks which names currently resolve in DNS, stores scan state in SQLite, and reports newly observed active assets.
 
 Use it only against domains you own or are explicitly authorized to monitor. CT data is public, but DNS probing and monitoring can still be subject to program rules, provider policies, and local law.
 
 ## Features
 
-* Queries `crt.sh`, with Cert Spotter as a fallback, for certificate names.
+* Aggregates and deduplicates names from `crt.sh`, Cert Spotter, AlienVault OTX, and HackerTarget.
 * Normalizes and filters names so only subdomains of the target are retained.
 * Resolves `A` and `AAAA` records concurrently to identify active assets.
 * Optionally probes active assets over HTTPS and HTTP for status codes, page titles, and server headers.
@@ -17,7 +17,7 @@ Use it only against domains you own or are explicitly authorized to monitor. CT 
 
 ### Prerequisites
 
-* Python 3.9 or higher
+* Python 3.10 or higher
 * Network access to the selected CT provider, DNS resolvers, and optional webhook endpoint
 * Authorization to monitor the target domain
 
@@ -58,10 +58,11 @@ python main.py --target example.com
 * `--target DOMAIN` is required.
 * `--threads N` limits concurrent DNS lookups (default: `50`; minimum: `1`).
 * `--db PATH` selects the SQLite file (default: `data/assets.db`).
-* `--timeout SECONDS` sets the HTTP, DNS, and webhook timeout (default: `10.0`).
+* `--timeout SECONDS` sets the CT, DNS, probe, and notification timeout (default: `10.0`).
+* `--webhook URL` sends Discord notifications.
 * `--probe` probes active assets over HTTPS and HTTP.
 * `--telegram BOT_TOKEN/CHAT_ID` sends alerts through the Telegram Bot API.
-* `--json` emits `target`, `assets`, and `new_assets` as JSON.
+* `--json` emits `target`, `assets`, `new_assets`, and `probes` as JSON. `probes` is empty unless `--probe` is enabled.
 * `-v` / `--verbose` enables debug logging.
 
 Examples:
@@ -104,12 +105,20 @@ The first scan stores every active asset as a baseline. Later scans report only
 assets that have not been seen before in the configured SQLite database. Address
 changes update an existing record but do not count as a new hostname. Names
 found in CT logs without an `A` or `AAAA` address are not stored as active assets.
-If `crt.sh` fails, the monitor retries through Cert Spotter before failing.
+Each passive discovery source is retried independently, twice. Results from all
+successful sources are merged and deduplicated; one provider being unavailable
+does not discard results from the others. The scan fails only if every source
+is unavailable.
+
+With `--probe`, every active hostname is requested over HTTPS and then HTTP.
+Reachable responses include the final URL, status code, page title, and `Server`
+header. Probe failures are skipped per URL and do not fail the scan.
 
 Discord alerts use the JSON webhook `content` field. Telegram alerts use the
 Bot API `sendMessage` endpoint. Alerts include newly discovered assets and,
-when `--probe` is enabled, HTTP status/title/server metadata. A failed
-notification request is reported as an error rather than silently ignored.
+when `--probe` is enabled, HTTP status/title/server metadata. Messages are split
+to fit provider limits. A failed notification request is reported as an error
+rather than silently ignored.
 
 ## Automated Execution
 
@@ -141,12 +150,14 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-The unit tests cover hostname normalization and SQLite new-asset detection.
-They do not call live CT or DNS services.
+The unit tests cover hostname normalization, passive-source parsing, title
+extraction, and SQLite new-asset detection. They do not call live CT, DNS, or
+HTTP services.
 
 ## Limitations
 
-* Discovery depends on public CT APIs and cannot enumerate names absent from those logs.
+* Discovery depends on public CT/passive-DNS APIs and cannot enumerate names absent from those sources.
+* Public providers may rate-limit requests or return incomplete results.
 * Only `A` and `AAAA` answers count as active; CNAME-only names are not included.
 * SQLite state is local and historical: hostnames that disappear are retained.
 * Webhook failures cause the CLI run to fail rather than being silently ignored.

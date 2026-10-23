@@ -1,9 +1,10 @@
-"""Certificate-transparency subdomain discovery."""
+"""Multi-source passive subdomain discovery."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import aiohttp
@@ -11,6 +12,8 @@ import aiohttp
 LOGGER = logging.getLogger(__name__)
 CRT_SH_URL = "https://crt.sh/"
 CERTSPOTTER_URL = "https://api.certspotter.com/v1/issuances"
+OTX_URL = "https://otx.alienvault.com/api/v1/indicators/domain/{target}/passive_dns"
+HACKERTARGET_URL = "https://api.hackertarget.com/hostsearch/"
 
 
 def normalize_subdomain(value: str, target: str) -> str | None:
@@ -25,47 +28,134 @@ def normalize_subdomain(value: str, target: str) -> str | None:
     return None
 
 
+def parse_crtsh(records: list[dict[str, Any]], target: str) -> set[str]:
+    return {
+        normalized
+        for record in records
+        for value in str(record.get("name_value", "")).splitlines()
+        if (normalized := normalize_subdomain(value, target))
+    }
+
+
+def parse_certspotter(records: list[dict[str, Any]], target: str) -> set[str]:
+    return {
+        normalized
+        for record in records
+        for value in record.get("dns_names", [])
+        if (normalized := normalize_subdomain(str(value), target))
+    }
+
+
+def parse_otx(payload: dict[str, Any], target: str) -> set[str]:
+    names: set[str] = set()
+    for record in payload.get("passive_dns", []):
+        value = record.get("hostname") or record.get("subdomain")
+        if value and (normalized := normalize_subdomain(str(value), target)):
+            names.add(normalized)
+    return names
+
+
+def parse_hackertarget(body: str, target: str) -> set[str]:
+    names: set[str] = set()
+    for line in body.splitlines():
+        value = line.split(",", 1)[0].strip()
+        if value and (normalized := normalize_subdomain(value, target)):
+            names.add(normalized)
+    return names
+
+
+async def _fetch_json(
+    session: aiohttp.ClientSession,
+    url: str,
+    params: dict[str, str],
+    parser: Callable[[Any, str], set[str]],
+    target: str,
+) -> set[str]:
+    async with session.get(url, params=params) as response:
+        response.raise_for_status()
+        payload = await response.json(content_type=None)
+    return parser(payload, target)
+
+
+async def _fetch_hackertarget(
+    session: aiohttp.ClientSession, target: str
+) -> set[str]:
+    async with session.get(HACKERTARGET_URL, params={"q": target}) as response:
+        response.raise_for_status()
+        body = await response.text()
+    if body.startswith("error"):
+        raise RuntimeError(body.strip())
+    return parse_hackertarget(body, target)
+
+
 async def discover_subdomains(target: str, timeout: float = 10.0) -> list[str]:
-    """Fetch unique names from public CT APIs, using Cert Spotter as a fallback."""
+    """Aggregate and deduplicate names from independent passive DNS sources.
+
+    A source outage is isolated from the others. The scan fails only when every
+    source fails, preventing one rate-limited provider from hiding valid results.
+    """
     request_timeout = aiohttp.ClientTimeout(total=timeout)
-    requests = (
-        (CRT_SH_URL, {"q": f"%.{target}", "output": "json"}, "name_value"),
+    source_requests: tuple[tuple[str, Callable[[], Awaitable[set[str]]]], ...] = (
         (
-            CERTSPOTTER_URL,
-            {"domain": target, "include_subdomains": "true", "expand": "dns_names"},
-            "dns_names",
+            "crt.sh",
+            lambda: _fetch_json(
+                session,
+                CRT_SH_URL,
+                {"q": f"%.{target}", "output": "json"},
+                parse_crtsh,
+                target,
+            ),
         ),
+        (
+            "Cert Spotter",
+            lambda: _fetch_json(
+                session,
+                CERTSPOTTER_URL,
+                {"domain": target, "include_subdomains": "true", "expand": "dns_names"},
+                parse_certspotter,
+                target,
+            ),
+        ),
+        (
+            "AlienVault OTX",
+            lambda: _fetch_json(
+                session,
+                OTX_URL.format(target=target),
+                {},
+                parse_otx,
+                target,
+            ),
+        ),
+        ("HackerTarget", lambda: _fetch_hackertarget(session, target)),
     )
-    errors: list[Exception] = []
+    discovered: set[str] = set()
+    successful_sources = 0
     async with aiohttp.ClientSession(timeout=request_timeout) as session:
-        for url, params, field in requests:
+        async def fetch_source(
+            name: str, fetch: Callable[[], Awaitable[set[str]]]
+        ) -> tuple[bool, set[str]]:
             for attempt in range(2):
                 try:
-                    async with session.get(url, params=params) as response:
-                        response.raise_for_status()
-                        records: list[dict[str, Any]] = await response.json(content_type=None)
-                    values = (
-                        name
-                        for record in records
-                        for name in (
-                            record.get(field, [])
-                            if field == "dns_names"
-                            else str(record.get(field, "")).splitlines()
-                        )
-                    )
-                    names = {
-                        normalized
-                        for value in values
-                        if (normalized := normalize_subdomain(str(value), target))
-                    }
-                    return sorted(names)
-                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-                    errors.append(exc)
-                    LOGGER.warning(
-                        "Certificate transparency request failed for %s (attempt %d/2): %s",
-                        url,
-                        attempt + 1,
-                        exc,
-                    )
-    error_summary = "; ".join(str(error) for error in errors[-2:])
-    raise RuntimeError(f"could not query certificate transparency logs: {error_summary}")
+                    result = await fetch()
+                    LOGGER.info("%s returned %d subdomains", name, len(result))
+                    return True, result
+                except (
+                    aiohttp.ClientError,
+                    asyncio.TimeoutError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    LOGGER.warning("%s request failed (attempt %d/2): %s", name, attempt + 1, exc)
+            return False, set()
+
+        results = await asyncio.gather(
+            *(fetch_source(name, fetch) for name, fetch in source_requests)
+        )
+    for succeeded, result in results:
+        if succeeded:
+            successful_sources += 1
+            discovered.update(result)
+    if successful_sources == 0:
+        raise RuntimeError("all passive discovery sources failed")
+    return sorted(discovered)

@@ -3,9 +3,10 @@
 ## Safe operation
 
 Monitor only domains in scope for you. Set concurrency and scheduling
-conservatively, and respect bug bounty rules, DNS provider policies, and
-webhook limits. SQLite files and logs can reveal infrastructure details, so
-restrict their permissions.
+conservatively, and respect bug bounty rules, DNS provider policies, passive
+source terms, and webhook limits. `--probe` makes outbound HTTP(S) requests to
+each active hostname; enable it only when that traffic is in scope. SQLite
+files and logs can reveal infrastructure details, so restrict their permissions.
 
 ## Scheduled setup
 
@@ -22,28 +23,37 @@ world-readable cron files where possible.
 
 ### `ModuleNotFoundError`
 
-Activate the virtual environment and reinstall dependencies:
+Activate the virtual environment and reinstall runtime and development dependencies:
 
 ```bash
 source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
 ```
 
-### CT discovery fails
+### Passive discovery fails
 
-Run with `--verbose` and verify outbound HTTPS access to `crt.sh` and Cert
-Spotter. Providers may be unavailable or rate-limited. A successful response
-with no matching names is treated as an empty result.
+Run with `--verbose` and verify outbound HTTPS access to `crt.sh`, Cert Spotter,
+AlienVault OTX, and HackerTarget. Providers may be unavailable or rate-limited.
+The implementation retries each source twice and continues when only some
+sources fail. The scan errors only when all sources fail.
 
 ### No active assets are found
 
-This is expected when CT names no longer resolve. Confirm DNS from the same host
+This is expected when passive-source names no longer resolve. Confirm DNS from the same host
 and remember that only `A` and `AAAA` answers count as active.
 
-### Webhook notification fails
+### Probes return no results
 
-Verify the URL is a Discord-compatible webhook, that it is reachable, and that
-the timeout is sufficient. The CLI reports the HTTP or network error.
+`--probe` tries HTTPS and then HTTP, follows redirects, and ignores connection,
+timeout, and decoding failures for individual URLs. A host can resolve in DNS
+while refusing HTTP(S), returning no probe entry.
+
+### Discord or Telegram notification fails
+
+For Discord, verify the webhook URL and reachability. For Telegram, pass the
+value as `BOT_TOKEN/CHAT_ID`; the tool constructs the Bot API `sendMessage`
+request. Messages are split to fit provider limits. The CLI reports HTTP or
+network errors instead of hiding them.
 
 ### Re-running reports no new assets
 
@@ -55,3 +65,10 @@ different target; preserve production databases as history.
 * `0`: scan completed successfully.
 * `2`: invalid CLI values or a handled runtime scan error.
 * Other unhandled exceptions may be surfaced by Python.
+
+## Data handling
+
+The SQLite database stores target, hostname, resolved addresses, and first/last
+seen timestamps. Probe metadata is printed or sent in notifications but is not
+stored. Do not commit databases, logs, bot tokens, or webhook URLs to the
+repository.
